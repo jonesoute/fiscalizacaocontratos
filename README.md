@@ -220,10 +220,3 @@ Este projeto está sob a licença **MIT**. Veja o arquivo `LICENSE` para mais de
 
 Para dúvidas ou sugestões:
 - Abra uma **issue** no GitHub
-- Email: suporte@fiscalizacao.gov.br
-
----
-
-**Desenvolvido com ❤️ para modernizar a gestão pública brasileira**
-
-🏛️ **Governo Federal** | 🇧🇷 **Brasil**
