@@ -10,6 +10,8 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+    <!-- PDF.js for PDF to canvas conversion -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
@@ -134,6 +136,46 @@
                 <div id="upload-tab" class="tab-content active">
                     <div class="upload-section">
                         <h3>Upload de Documentos</h3>
+        <!-- Contract Management -->
+        <div class="contract-management">
+            <h4>Gerenciar Contratos e Termos</h4>
+            <div class="contract-forms">
+                <form id="add-contract-form" class="small-form">
+                    <h5>Adicionar Contrato</h5>
+                    <input type="text" id="contract-number" placeholder="Número do Contrato" required>
+                    <input type="text" id="contract-title" placeholder="Título do Contrato" required>
+                    <input type="text" id="contract-contractor" placeholder="Contratado (nome/CNPJ)" required>
+                    <input type="text" id="contract-value" placeholder="Valor (R$) - ex: 12345.67" required>
+                    <input type="date" id="contract-start" placeholder="Data Início" required>
+                    <input type="date" id="contract-end" placeholder="Data Término" required>
+                    <button type="button" id="btn-add-contract">Adicionar Contrato</button>
+                </form>
+
+                <form id="add-aditivo-form" class="small-form">
+                    <h5>Adicionar Termo Aditivo</h5>
+                    <input type="text" id="aditivo-contract-number" placeholder="Número do Contrato (relacionar)" required>
+                    <input type="text" id="aditivo-number" placeholder="Número do Termo Aditivo" required>
+                    <input type="text" id="aditivo-value" placeholder="Valor Adicional (R$) - ex: 1234.56" required>
+                    <input type="date" id="aditivo-date" placeholder="Data do Aditivo" required>
+                    <button type="button" id="btn-add-aditivo">Adicionar Aditivo</button>
+                </form>
+
+                <form id="add-prorrogacao-form" class="small-form">
+                    <h5>Adicionar Prorrogação</h5>
+                    <input type="text" id="prorro-contract-number" placeholder="Número do Contrato (relacionar)" required>
+                    <input type="date" id="prorro-new-end" placeholder="Nova data de término" required>
+                    <input type="text" id="prorro-reason" placeholder="Motivo da Prorrogação" required>
+                    <button type="button" id="btn-add-prorro">Adicionar Prorrogação</button>
+                </form>
+            </div>
+
+            <div class="contract-list">
+                <h5>Contratos Cadastrados</h5>
+                <div id="contracts-container"></div>
+            </div>
+        </div>
+        <!-- End Contract Management -->
+        
                         
                         <div class="upload-area" id="upload-area">
                             <div class="upload-content">

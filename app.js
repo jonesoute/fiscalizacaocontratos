@@ -97,23 +97,8 @@ const DatabaseModule = {
 
         console.log('Inicializando novo banco de dados...');
         return new Promise((resolve, reject) => {
-            // Deletar banco existente para evitar problemas de versão
-            const deleteRequest = indexedDB.deleteDatabase(APP_CONFIG.dbName);
-            
-            deleteRequest.onsuccess = () => {
-                console.log('Banco anterior removido');
-                this.createDatabase(resolve, reject);
-            };
-            
-            deleteRequest.onerror = () => {
-                console.log('Continuando sem remover banco anterior');
-                this.createDatabase(resolve, reject);
-            };
-            
-            deleteRequest.onblocked = () => {
-                console.log('Remoção bloqueada, continuando');
-                this.createDatabase(resolve, reject);
-            };
+            // Abrir/criar banco sem deletar dados existentes
+            this.createDatabase(resolve, reject);
         });
     },
 
@@ -139,7 +124,7 @@ const DatabaseModule = {
             
             try {
                 // Limpar stores existentes se necessário
-                const storeNames = ['usuarios', 'contratos', 'documentos', 'inconsistencias', 'regras'];
+                const storeNames = ['usuarios', 'contratos', 'documentos', 'inconsistencias', 'regras','aditivos','prorrogacoes'];
                 
                 storeNames.forEach(storeName => {
                     if (db.objectStoreNames.contains(storeName)) {
@@ -737,15 +722,64 @@ function setupFileUpload() {
 }
 
 async function handleFileUpload(files) {
-    const documentType = document.getElementById('document-type').value;
-    
+    const documentTypeElem = document.getElementById('document-type');
+    const documentType = documentTypeElem ? documentTypeElem.value : null;
+
     if (!documentType) {
         showToast('Selecione o tipo de documento antes de fazer upload', 'warning');
         return;
     }
-    
-    showToast(`Simulando upload de ${files.length} arquivo(s)...`, 'info');
-    console.log(`Upload simulado de ${files.length} arquivos do tipo ${documentType}`);
+
+    showLoading('Processando arquivos...');
+
+    for (const file of files) {
+        try {
+            console.log('Processando arquivo:', file.name);
+            // Run OCR (works for images; PDF supported only if browser handles it)
+            let extractedText = '';
+            try {
+                extractedText = await runOCR(file);
+            } catch (err) {
+                console.warn('OCR falhou para', file.name, err);
+                extractedText = ''; // continue, store file metadata
+            }
+
+            const documento = {
+                contrato_id: appState.currentContract ? appState.currentContract.id : null,
+                nome: file.name,
+                tipo: documentType,
+                texto_extraido: extractedText,
+                tamanho: file.size,
+                tipo_mime: file.type,
+                data_upload: new Date().toISOString()
+            };
+
+            // Save document (use addToStore for new)
+            try {
+                const id = await DatabaseModule.addToStore('documentos', documento);
+                documento.id = id;
+            } catch (e) {
+                // fallback to saveToStore if add fails (e.g., key exists)
+                await DatabaseModule.saveToStore('documentos', documento);
+            }
+
+            // Run simple validations and persist issues
+            const issues = runValidationsOnText(extractedText, documento);
+            for (const inc of issues) {
+                await DatabaseModule.addToStore('inconsistencias', inc);
+            }
+
+            showToast(`Arquivo ${file.name} processado. ${issues.length} inconsistência(s) detectada(s).`, 'success');
+        } catch (error) {
+            console.error('Erro ao processar arquivo', file.name, error);
+            showToast(`Erro ao processar ${file.name}`, 'error');
+        }
+    }
+
+    hideLoading();
+    // refresh UI (if functions exist)
+    if (typeof loadDocuments === 'function') loadDocuments();
+    if (typeof loadValidations === 'function') loadValidations();
 }
 
 async function loadDocuments() {
@@ -860,6 +894,246 @@ function showToast(message, type = 'info') {
     }, 5000);
 }
 
+
+// ============== OCR & VALIDATION HELPERS ==============
+async function initOCRWorker() {
+    if (appState.ocrWorker) return appState.ocrWorker;
+    if (typeof Tesseract === 'undefined' || !Tesseract.createWorker) {
+        console.warn('Tesseract.js não disponível no ambiente. OCR será ignorado.');
+        return null;
+    }
+    const worker = Tesseract.createWorker({
+        logger: m => {
+            // progresso opcional
+            // console.log('[TESSERACT]', m);
+        }
+    });
+    await worker.load();
+    await worker.loadLanguage('por');
+    await worker.initialize('por');
+    appState.ocrWorker = worker;
+    return worker;
+}
+
+async function runOCR(file) {
+    try {
+        const worker = await initOCRWorker();
+        if (!worker) return '';
+        // create object URL for file
+        const url = URL.createObjectURL(file);
+        const { data: { text } } = await worker.recognize(url);
+        URL.revokeObjectURL(url);
+        return text || '';
+    } catch (err) {
+        console.error('runOCR error:', err);
+        return '';
+    }
+}
+
+// Simple rule engine for validations - extend as needed
+function runValidationsOnText(text, documento) {
+    const issues = [];
+    if (!text || text.trim().length === 0) {
+        issues.push({
+            contrato_id: documento.contrato_id,
+            documento_id: documento.id || null,
+            tipo: 'TEXT_EMPTY',
+            descricao: 'Texto extraído está vazio.',
+            nivel: 'warning',
+            criado_em: new Date().toISOString()
+        });
+        return issues;
+    }
+    // CNPJ regex (formatted)
+    const cnpjRegex = /\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b/g;
+    const cnpjFound = text.match(cnpjRegex);
+    if (!cnpjFound) {
+        issues.push({
+            contrato_id: documento.contrato_id,
+            documento_id: documento.id || null,
+            tipo: 'CNPJ_MISSING',
+            descricao: 'CNPJ não encontrado no documento.',
+            nivel: 'warning',
+            criado_em: new Date().toISOString()
+        });
+    }
+    // Valor em Reais
+    const valorRegex = /R\$\s?[\d\.\,]+/g;
+    const valores = text.match(valorRegex);
+    if (!valores || valores.length === 0) {
+        issues.push({
+            contrato_id: documento.contrato_id,
+            documento_id: documento.id || null,
+            tipo: 'VALOR_MISSING',
+            descricao: 'Valor em R$ não encontrado no documento.',
+            nivel: 'info',
+            criado_em: new Date().toISOString()
+        });
+    }
+    return issues;
+}
+
+// ============== END OCR & VALIDATION HELPERS ==============
+
+// ============== CONTRACT & TERM MANAGEMENT ==============
+
+/**
+ * addContract(contractObj)
+ * contractObj = {
+ *   numero, titulo, contratado, valor, data_inicio, data_termino
+ * }
+ */
+async function addContract(contractObj) {
+    // convert numeric value
+    contractObj.valor = Number(contractObj.valor) || 0;
+    contractObj.created_at = new Date().toISOString();
+    try {
+        const id = await DatabaseModule.addToStore('contratos', contractObj);
+        showToast('Contrato adicionado', 'success');
+        if (typeof loadContracts === 'function') loadContracts();
+        return id;
+    } catch (err) {
+        console.error('addContract error', err);
+        showToast('Falha ao adicionar contrato', 'error');
+        throw err;
+    }
+}
+
+async function addAditivo(aditivoObj) {
+    aditivoObj.valor = Number(aditivoObj.valor) || 0;
+    aditivoObj.created_at = new Date().toISOString();
+    try {
+        const id = await DatabaseModule.addToStore('aditivos', aditivoObj);
+        showToast('Termo aditivo adicionado', 'success');
+        if (typeof loadContracts === 'function') loadContracts();
+        return id;
+    } catch (err) {
+        console.error('addAditivo error', err);
+        showToast('Falha ao adicionar aditivo', 'error');
+        throw err;
+    }
+}
+
+async function addProrrogacao(prorroObj) {
+    prorroObj.created_at = new Date().toISOString();
+    try {
+        const id = await DatabaseModule.addToStore('prorrogacoes', prorroObj);
+        showToast('Prorrogação adicionada', 'success');
+        if (typeof loadContracts === 'function') loadContracts();
+        return id;
+    } catch (err) {
+        console.error('addProrrogacao error', err);
+        showToast('Falha ao adicionar prorrogação', 'error');
+        throw err;
+    }
+}
+
+async function loadContracts() {
+    try {
+        const contratos = await DatabaseModule.getFromStore('contratos');
+        const aditivos = await DatabaseModule.getFromStore('aditivos');
+        const prorrogacoes = await DatabaseModule.getFromStore('prorrogacoes');
+        renderContracts(contratos || [], aditivos || [], prorrogacoes || []);
+    } catch (err) {
+        console.error('loadContracts error', err);
+    }
+}
+
+function renderContracts(contratos, aditivos, prorrogacoes) {
+    const container = document.getElementById('contracts-container');
+    if (!container) return;
+    container.innerHTML = '';
+    contratos.forEach(c => {
+        const cAditivos = (aditivos || []).filter(a => a.contrato_numero === c.numero);
+        const cPror = (prorrogacoes || []).filter(p => p.contrato_numero === c.numero);
+        // compute adjusted value
+        const somaAditivos = cAditivos.reduce((s, a) => s + (Number(a.valor)||0), 0);
+        const valorAtual = (Number(c.valor)||0) + somaAditivos;
+        const currentEnd = cPror.length ? cPror[cPror.length-1].nova_data_termino : c.data_termino;
+        const item = document.createElement('div');
+        item.className = 'contract-item';
+        item.innerHTML = `<div class="meta"><strong>${c.numero} - ${c.titulo}</strong><div>Contratado: ${c.contratado}</div><div>Valor original: R$ ${Number(c.valor).toFixed(2)} | Valor atual: R$ ${Number(valorAtual).toFixed(2)}</div><div>Vigência: ${c.data_inicio} → ${currentEnd}</div></div>
+                          <div class="actions"><button type="button" onclick="viewContractDetails('${c.numero}')">Ver</button></div>`;
+        container.appendChild(item);
+    });
+}
+
+function viewContractDetails(numero) {
+    // simple modal display using alert for now, can be improved
+    (async () => {
+        const contratos = await DatabaseModule.getFromStore('contratos');
+        const c = (contratos || []).find(x => x.numero === numero);
+        if (!c) { showToast('Contrato não encontrado', 'warning'); return; }
+        const aditivos = await DatabaseModule.getFromStore('aditivos');
+        const prorrogacoes = await DatabaseModule.getFromStore('prorrogacoes');
+        const cAditivos = (aditivos || []).filter(a => a.contrato_numero === c.numero);
+        const cPror = (prorrogacoes || []).filter(p => p.contrato_numero === c.numero);
+        let msg = `Contrato ${c.numero} - ${c.titulo}\nContratado: ${c.contratado}\nValor original: R$ ${Number(c.valor).toFixed(2)}\nVigência: ${c.data_inicio} → ${c.data_termino}\n\nAditivos:\n`;
+        if (cAditivos.length===0) msg += ' - Nenhum aditivo\n'; else cAditivos.forEach(a => msg += ` - ${a.aditivo_number || a.numero}: +R$ ${Number(a.valor).toFixed(2)} em ${a.created_at}\n`);
+        msg += '\nProrrogações:\n';
+        if (cPror.length===0) msg += ' - Nenhuma prorrogação\n'; else cPror.forEach(p => msg += ` - Nova data término: ${p.nova_data_termino} (motivo: ${p.motivo || p.reason})\n`);
+        alert(msg);
+    })();
+}
+
+// Validation: check expirations and value mismatches
+async function validateContracts() {
+    const contratos = await DatabaseModule.getFromStore('contratos') || [];
+    const aditivos = await DatabaseModule.getFromStore('aditivos') || [];
+    const prorrogacoes = await DatabaseModule.getFromStore('prorrogacoes') || [];
+    const issues = [];
+    contratos.forEach(c => {
+        const cAditivos = aditivos.filter(a => a.contrato_numero === c.numero);
+        const somaAditivos = cAditivos.reduce((s, a) => s + (Number(a.valor)||0), 0);
+        const valorAtual = (Number(c.valor)||0) + somaAditivos;
+        // if any documento refers a different value, flag (simple heuristic)
+        // search documentos for lines containing R$ and the contract number
+        // naive: count documents mentioning contract number and values
+        // This is just an example; expand with robust parsing if needed.
+        const docs = (await DatabaseModule.getFromStore('documentos')) || [];
+        const relatedDocs = docs.filter(d => (d.texto_extraido || '').includes(c.numero) || d.contrato_id === c.id);
+        relatedDocs.forEach(d => {
+            const foundVals = (d.texto_extraido || '').match(/R\$\s?[\d\.\,]+/g) || [];
+            foundVals.forEach(fv => {
+                // clean number
+                const num = Number(fv.replace(/[R\$\.\s]/g,'').replace(',', '.'));
+                if (!isNaN(num) && Math.abs(num - valorAtual) / Math.max(1, valorAtual) > 0.05) {
+                    issues.push({
+                        contrato_numero: c.numero,
+                        documento_id: d.id || null,
+                        tipo: 'VALOR_DIVERGENTE',
+                        descricao: `Valor declarado no documento (${fv}) diverge do valor atual do contrato (R$ ${valorAtual.toFixed(2)}).`,
+                        nivel: 'warning',
+                        criado_em: new Date().toISOString()
+                    });
+                }
+            });
+        });
+        // check expiration: if no active prorrogação and end date passed
+        const lastPror = prorrogacoes.filter(p => p.contrato_numero === c.numero).sort((a,b)=> (a.created_at||'') > (b.created_at||'') ? 1:-1).pop();
+        const effectiveEnd = lastPror ? lastPror.nova_data_termino : c.data_termino;
+        if (effectiveEnd && new Date(effectiveEnd) < new Date()) {
+            issues.push({
+                contrato_numero: c.numero,
+                tipo: 'CONTRATO_VENCIDO',
+                descricao: `Contrato com término em ${effectiveEnd} já expirou.`,
+                nivel: 'error',
+                criado_em: new Date().toISOString()
+            });
+        }
+    });
+    // persist issues to inconsistencias store
+    for (const inc of issues) {
+        await DatabaseModule.addToStore('inconsistencias', inc);
+    }
+    showToast(`${issues.length} inconsistência(s) de contrato detectada(s)`, issues.length? 'warning' : 'success');
+    return issues;
+}
+
+// ============== END CONTRACT & TERM MANAGEMENT ==============
+
+
+
 function logout() {
     AuthModule.logout();
 }
@@ -936,6 +1210,62 @@ document.addEventListener('DOMContentLoaded', async function() {
 });
 
 // ================== EXPOR FUNÇÕES GLOBALMENTE ==================
+
+
+// ============== UI HOOKS FOR CONTRACT FORMS ==============
+function setupContractFormHooks() {
+    const btnAddContract = document.getElementById('btn-add-contract');
+    if (btnAddContract) {
+        btnAddContract.addEventListener('click', async () => {
+            const numero = document.getElementById('contract-number').value.trim();
+            const titulo = document.getElementById('contract-title').value.trim();
+            const contratado = document.getElementById('contract-contractor').value.trim();
+            const valor = document.getElementById('contract-value').value.trim();
+            const data_inicio = document.getElementById('contract-start').value;
+            const data_termino = document.getElementById('contract-end').value;
+            if (!numero || !titulo) { showToast('Preencha número e título', 'warning'); return; }
+            await addContract({ numero, titulo, contratado, valor, data_inicio, data_termino });
+            // clear form
+            document.getElementById('add-contract-form').reset();
+        });
+    }
+
+    const btnAddAditivo = document.getElementById('btn-add-aditivo');
+    if (btnAddAditivo) {
+        btnAddAditivo.addEventListener('click', async () => {
+            const contrato_numero = document.getElementById('aditivo-contract-number').value.trim();
+            const aditivo_number = document.getElementById('aditivo-number').value.trim();
+            const valor = document.getElementById('aditivo-value').value.trim();
+            const data = document.getElementById('aditivo-date').value;
+            if (!contrato_numero || !aditivo_number) { showToast('Preencha contrato e número do aditivo', 'warning'); return; }
+            await addAditivo({ contrato_numero, aditivo_number, valor, data, criado_em: new Date().toISOString() });
+            document.getElementById('add-aditivo-form').reset();
+        });
+    }
+
+    const btnAddProrro = document.getElementById('btn-add-prorro');
+    if (btnAddProrro) {
+        btnAddProrro.addEventListener('click', async () => {
+            const contrato_numero = document.getElementById('prorro-contract-number').value.trim();
+            const nova_data_termino = document.getElementById('prorro-new-end').value;
+            const motivo = document.getElementById('prorro-reason').value.trim();
+            if (!contrato_numero || !nova_data_termino) { showToast('Preencha contrato e nova data', 'warning'); return; }
+            await addProrrogacao({ contrato_numero, nova_data_termino, motivo, criado_em: new Date().toISOString() });
+            document.getElementById('add-prorrogacao-form').reset();
+        });
+    }
+}
+
+// Call setup after init completes (hook into existing init flow)
+document.addEventListener('DOMContentLoaded', () => {
+    try {
+        setupContractFormHooks();
+        // load existing contracts to render
+        if (typeof loadContracts === 'function') loadContracts();
+    } catch (e) {
+        console.warn('setupContractFormHooks error', e);
+    }
+});
 window.selectContract = selectContract;
 window.switchTab = switchTab;
 window.generateReport = generateReport;

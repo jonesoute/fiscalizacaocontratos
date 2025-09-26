@@ -1498,3 +1498,14 @@ select.form-control {
     animation: none;
   }
 }
+
+
+/* Contract management */
+.contract-management { margin-top: 18px; padding: 12px; border: 1px solid #e2e2e2; border-radius:8px; background:#fff; }
+.contract-forms { display:flex; gap:12px; flex-wrap:wrap; }
+.small-form { width: 300px; padding:8px; border-radius:6px; background:#fbfbfb; border:1px solid #ddd; }
+.small-form input { width:100%; margin:6px 0; padding:8px; box-sizing:border-box; }
+.small-form button { width:100%; padding:8px; margin-top:6px; }
+.contract-list { margin-top:12px; }
+.contract-item { padding:8px; border-bottom:1px solid #eee; display:flex; justify-content:space-between; align-items:center; }
+.contract-item .meta { font-size:0.9rem; color:#333; }
